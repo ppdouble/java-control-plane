@@ -1,0 +1,61 @@
+version: 2
+jobs:
+  build:
+    machine:
+      image: ubuntu-2004:202201-02
+
+    working_directory: ~/repo
+
+    environment:
+      # Customize the JVM maximum heap limit
+      MAVEN_OPTS: -Xms512m -Xmx1024m
+
+    steps:
+      - checkout
+
+      # Download and cache dependencies
+      - restore_cache:
+          keys:
+          - v1-dependencies-{{ checksum "pom.xml" }}-{{ checksum "cache/pom.xml" }}-{{ checksum "server/pom.xml" }}
+          # fallback to using the latest cache if no exact match is found
+          - v1-dependencies-
+
+      # Build
+      - run:
+          command: mvn -B install -DskipTests -Dmaven.javadoc.skip=true dependency:go-offline
+          no_output_timeout: 20m
+
+      # Save the dependency cache for future runs
+      - save_cache:
+          paths:
+            - ~/.m2
+          key: v1-dependencies-{{ checksum "pom.xml" }}-{{ checksum "cache/pom.xml" }}-{{ checksum "server/pom.xml" }}
+
+      # Test
+      - run: mvn -B -Dmaven.javadoc.skip=true verify
+
+      - add_ssh_keys
+
+      # Deploy if on main branch. If the $RELEASE and $NEXT variables are set then prepare a full maven release.
+      - deploy:
+          command: |
+            if [ "${CIRCLE_BRANCH}" == "main" ]; then
+              echo $GPG_KEY | base64 --decode > signing-key
+              gpg --batch --passphrase $GPG_PASSPHRASE --import signing-key
+              shred signing-key
+
+              if [[ -n "${RELEASE}" && -n "${NEXT}" ]]; then
+                git config --global user.email "envoy-bot@users.noreply.github.com"
+                git config --global user.name "envoy-bot"
+                mvn -B -s .circleci/settings.xml release:prepare -Darguments="-s .circleci/settings.xml" -DreleaseVersion=$RELEASE -DdevelopmentVersion=$NEXT -DscmCommentPrefix="release: "
+              else
+                mvn -B -s .circleci/settings.xml deploy
+              fi
+            elif [[ -n "${DEPLOY_BRANCH}" ]]; then
+              echo $GPG_KEY | base64 --decode > signing-key
+              gpg --batch --passphrase $GPG_PASSPHRASE --import signing-key
+              shred signing-key
+
+              mvn -B -s .circleci/settings-snapshots.xml deploy
+            fi
+      - run: bash <(curl -s https://codecov.io/bash)
